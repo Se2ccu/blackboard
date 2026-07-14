@@ -77,6 +77,13 @@ class LocalManagedProcess:
         self._reader_err: threading.Thread | None = None
         self._tee_path = tee_path
         self._started_at: str | None = None
+        self._live_path: Path | None = self._compute_live_path()
+
+    def _compute_live_path(self) -> Path | None:
+        """For opencode, write stdout to a live jsonl so --live can tail it."""
+        if not self._tee_path or not self.command or self.command[0] != "opencode":
+            return None
+        return Path(self._tee_path).parent / "sessions" / "live.jsonl"
 
     def start(self) -> None:
         # Build argv. We wrap with `timeout -k` when a timeout is set, exactly
@@ -182,6 +189,12 @@ class LocalManagedProcess:
             )
             Path(self._tee_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
             self._copy_trace(session_id, stdout_text)
+            # Remove the live file after the final trace is archived
+            if self._live_path is not None and self._live_path.exists():
+                try:
+                    self._live_path.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as exc:  # noqa: BLE001
             LOG.warning("tee write failed path=%s error=%s", self._tee_path, exc)
 
@@ -275,6 +288,14 @@ class LocalManagedProcess:
         return None
 
     def _read_stream(self, pipe: Any, sink: list[bytes]) -> None:
+        is_stdout = pipe is self._proc.stdout if self._proc else False
+        live_file = None
+        if is_stdout and self._live_path is not None:
+            try:
+                self._live_path.parent.mkdir(parents=True, exist_ok=True)
+                live_file = self._live_path.open("ab", buffering=0)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("live file open failed path=%s error=%s", self._live_path, exc)
         try:
             assert pipe is not None
             while True:
@@ -282,9 +303,19 @@ class LocalManagedProcess:
                 if not chunk:
                     break
                 sink.append(chunk)
+                if live_file is not None:
+                    try:
+                        live_file.write(chunk)
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as exc:  # noqa: BLE001
             self._read_error = str(exc)
         finally:
+            if live_file is not None:
+                try:
+                    live_file.close()
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 self._proc.wait(timeout=10)
             except subprocess.TimeoutExpired:

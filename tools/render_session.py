@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""渲染 claude session jsonl 为人类可读的时间线。
+"""渲染 session jsonl 为人类可读的时间线。支持 claude 和 opencode 两种事件格式。
 
 用法：
-    uv run python tools/render_session.py runs/proj_005/sessions/3d45f6fe....jsonl
-    uv run python tools/render_session.py runs/proj_005/sessions/3d45f6fe....jsonl --follow
-    uv run python tools/render_session.py runs/proj_005/sessions/3d45f6fe....jsonl --result-len 200
+    uv run python tools/render_session.py runs/proj_003/sessions/3d45f6fe....jsonl
+    uv run python tools/render_session.py runs/proj_003/sessions/3d45f6fe....jsonl --follow
+    uv run python tools/render_session.py --live          # 实时看当前正在跑的 session
 
 每一步按顺序展示：thinking（推理）/ tool_use（调用哪个工具+参数）/ tool_result（输出，截断）/
 assistant 文本。比原始 jsonl 好读，可 grep。
@@ -31,11 +31,21 @@ def _supports_color() -> bool:
 
 
 def render_event(event: dict, pending_results: dict, *, result_len: int, color: bool) -> list[str]:
-    """把一条 jsonl 事件渲染成若干行。返回行列表。"""
+    """把一条 jsonl 事件渲染成若干行。返回行列表。
+
+    支持两种格式：
+    - claude: {"type":"user"|"assistant","message":{"content":[{"type":"thinking"|"text"|"tool_use",...}]}}
+    - opencode: {"type":"step_start"|"text"|"tool_use"|"step_finish","part":{"type":"step-start"|"text"|"tool"|"step-finish",...}}
+    """
     etype = event.get("type", "")
     lines: list[str] = []
     ts = _fmt_ts(event.get("timestamp"))
 
+    # --- opencode format ---
+    if "part" in event and isinstance(event["part"], dict):
+        return _render_opencode_event(event, ts, pending_results, result_len=result_len, color=color)
+
+    # --- claude format ---
     if etype == "user":
         msg = event.get("message", {})
         content = msg.get("content")
@@ -108,6 +118,90 @@ def render_event(event: dict, pending_results: dict, *, result_len: int, color: 
     return lines
 
 
+def _render_opencode_event(event: dict, ts: str, pending_results: dict, *, result_len: int, color: bool) -> list[str]:
+    """渲染 opencode JSON 事件流格式。"""
+    lines: list[str] = []
+    etype = event.get("type", "")
+    part = event.get("part", {})
+    if not isinstance(part, dict):
+        return lines
+
+    ptype = part.get("type", "")
+
+    if etype == "step_start" or ptype == "step-start":
+        if color:
+            lines.append(f"{C_TIME}--- step start ---{C_RESET}")
+        else:
+            lines.append("--- step start ---")
+        return lines
+
+    if etype == "step_finish" or ptype == "step-finish":
+        tokens = part.get("tokens", {})
+        total = tokens.get("total", "?")
+        if color:
+            lines.append(f"{C_TIME}--- step finish (tokens={total}) ---{C_RESET}")
+        else:
+            lines.append(f"--- step finish (tokens={total}) ---")
+        return lines
+
+    if etype == "text" or ptype == "text":
+        body = part.get("text", "").strip()
+        if not body:
+            return lines
+        if color:
+            lines.append(f"{C_TEXT}💬 assistant{C_RESET}")
+        else:
+            lines.append("assistant")
+        for ln in body.split("\n"):
+            lines.append(f"  {ln}")
+        return lines
+
+    if etype == "tool_use" or ptype == "tool":
+        tool_name = part.get("tool", "?")
+        call_id = part.get("callID", "")
+        state = part.get("state", {})
+        if not isinstance(state, dict):
+            state = {}
+        status = state.get("status", "")
+        inp = state.get("input", {})
+        if not isinstance(inp, dict):
+            inp = {}
+        output = state.get("output", "")
+
+        one_liner = _tool_one_liner(tool_name, inp)
+        if ts:
+            prefix = f"{C_TIME}{ts}{C_RESET} " if color else f"{ts} "
+        else:
+            prefix = ""
+
+        if status in ("completed", "success"):
+            if color:
+                lines.append(f"{prefix}{C_TOOL}▶ {tool_name}{C_RESET}: {one_liner}")
+            else:
+                lines.append(f"{prefix}▶ {tool_name}: {one_liner}")
+            if output:
+                body = str(output).strip()
+                if color:
+                    lines.append(f"  {C_RESULT}◀ {tool_name} result{C_RESET}")
+                else:
+                    lines.append(f"  ◀ {tool_name} result")
+                for ln in _truncate(body, result_len).split("\n"):
+                    lines.append(f"    {ln}")
+        elif status == "pending":
+            if color:
+                lines.append(f"{prefix}{C_TOOL}▶ {tool_name} (pending){C_RESET}: {one_liner}")
+            else:
+                lines.append(f"{prefix}▶ {tool_name} (pending): {one_liner}")
+        else:
+            if color:
+                lines.append(f"{prefix}{C_TOOL}▶ {tool_name} ({status}){C_RESET}: {one_liner}")
+            else:
+                lines.append(f"{prefix}▶ {tool_name} ({status}): {one_liner}")
+        return lines
+
+    return lines
+
+
 def _tool_one_liner(name: str, inp: dict) -> str:
     """把工具参数压缩成一行可读摘要。"""
     if not isinstance(inp, dict):
@@ -135,12 +229,16 @@ def _truncate(text: str, limit: int) -> str:
 def _fmt_ts(ts) -> str:
     if not ts:
         return ""
-    # claude 用 ISO 字符串；只取时分秒
     s = str(ts)
-    # 2026-07-12T01:23:45.xxxZ -> 01:23:45
+    # claude: ISO string "2026-07-12T01:23:45.xxxZ" -> 01:23:45
     if "T" in s:
-        s = s.split("T")[1].split(".")[0].split("Z")[0]
-    return s
+        return s.split("T")[1].split(".")[0].split("Z")[0]
+    # opencode: epoch milliseconds (int) -> HH:MM:SS
+    try:
+        import datetime
+        return datetime.datetime.fromtimestamp(int(s) / 1000).strftime("%H:%M:%S")
+    except (ValueError, OSError):
+        return s
 
 
 def render_file(path: Path, *, result_len: int, color: bool) -> None:
@@ -215,14 +313,33 @@ def find_latest_archived() -> Path | None:
 
 
 def find_latest_live() -> Path | None:
-    """~/.claude/projects/<cwd-dir>/ 下 mtime 最新的 jsonl（实时写入，跑的时候就能看）。"""
+    """Find the newest live session file being written now.
+
+    Checks two locations:
+    - opencode: runs/*/sessions/live.jsonl (written in realtime by LocalManagedProcess)
+    - claude: ~/.claude/projects/<cwd-dashes>/*.jsonl (written by claude during execution)
+    """
     import os
+    import subprocess
+    # opencode live file (runs/<project>/sessions/live.jsonl)
+    try:
+        out = subprocess.check_output(
+            ["find", "runs", "-name", "live.jsonl", "-path", "*/sessions/*"], text=True
+        ).strip().splitlines()
+        files = [Path(p) for p in out if p]
+        if files:
+            return max(files, key=lambda p: p.stat().st_mtime)
+    except Exception:
+        pass
+
+    # claude live file
     cwd = os.getcwd()
     project_dir = Path("~/.claude/projects/" + cwd.replace("/", "-")).expanduser()
-    if not project_dir.is_dir():
-        return None
-    files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0] if files else None
+    if project_dir.is_dir():
+        files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    return None
 
 
 def main() -> int:
@@ -260,7 +377,7 @@ def main() -> int:
     elif args.live:
         path = find_latest_live()
         if path is None:
-            print("no live session found under ~/.claude/projects/", file=sys.stderr)
+            print("no live session found (checked runs/*/sessions/live.jsonl and ~/.claude/projects/)", file=sys.stderr)
             return 1
     elif path is None:
         ap.error("need a file path, or use --latest / --live")
