@@ -27,9 +27,12 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -58,7 +61,7 @@ class LocalManagedProcess:
     - ``kill()`` / ``cancel(reason)`` terminate the process group.
     """
 
-    def __init__(self, command: list[str], env: dict[str, str], timeout_seconds: int | None):
+    def __init__(self, command: list[str], env: dict[str, str], timeout_seconds: int | None, tee_path: str | None = None):
         self.command = command
         self.env = env
         self._timeout_seconds = timeout_seconds
@@ -72,6 +75,8 @@ class LocalManagedProcess:
         self._done = threading.Event()
         self._reader_out: threading.Thread | None = None
         self._reader_err: threading.Thread | None = None
+        self._tee_path = tee_path
+        self._started_at: str | None = None
 
     def start(self) -> None:
         # Build argv. We wrap with `timeout -k` when a timeout is set, exactly
@@ -87,6 +92,7 @@ class LocalManagedProcess:
         run_env.update({k: str(v) for k, v in self.env.items()})
 
         LOG.debug("local exec: %s", shlex.join(argv))
+        self._started_at = datetime.now().isoformat(timespec="seconds")
         self._proc = subprocess.Popen(
             argv,
             stdout=subprocess.PIPE,
@@ -122,6 +128,7 @@ class LocalManagedProcess:
             self._returncode = self._proc.returncode if self._proc.returncode is not None else 1
         if self._read_error and not self._stderr:
             self._stderr.append(self._read_error.encode("utf-8", errors="replace"))
+        self._write_tee()
         return ProcessResult(
             returncode=self._returncode,
             stdout=b"".join(self._stdout).decode("utf-8", errors="replace"),
@@ -145,6 +152,94 @@ class LocalManagedProcess:
         if self._cancel_reason is None:
             self._cancel_reason = reason
         self.kill()
+
+    def _write_tee(self) -> None:
+        # Dump the full captured stdout/stderr to a session log so the worker's
+        # raw process I/O survives after extract_response_text consumes it.
+        # Complements `claude -r <session> --resume` (see header) which holds the
+        # full step-by-step reasoning; this file holds the process-level I/O.
+        if not self._tee_path:
+            return
+        try:
+            Path(self._tee_path).parent.mkdir(parents=True, exist_ok=True)
+            stdout_text = b"".join(self._stdout).decode("utf-8", errors="replace")
+            stderr_text = b"".join(self._stderr).decode("utf-8", errors="replace")
+            session_id = self._extract_session_id(self.command)
+            lines = [
+                "=== cairn local worker session ===",
+                f"started: {self._started_at}",
+                f"command: {shlex.join(self.command)[:500]}",
+            ]
+            if session_id:
+                lines.append(
+                    f"session_id: {session_id}  (resume full reasoning: claude -r {session_id} --resume)"
+                )
+            lines.extend(["--- stdout ---", stdout_text or "(empty)"])
+            lines.extend(["--- stderr ---", stderr_text or "(empty)"])
+            lines.append(
+                f"--- exit: code={self._returncode} timed_out={self._timed_out} "
+                f"cancelled={self._cancel_reason is not None} ---"
+            )
+            Path(self._tee_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self._copy_claude_trace(session_id)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("tee write failed path=%s error=%s", self._tee_path, exc)
+
+    def _copy_claude_trace(self, session_id: str | None) -> None:
+        # The real step-by-step reasoning (thinking / tool_use / tool_result) lives
+        # in claude's own session jsonl under ~/.claude/projects/<cwd-as-dashes>/.
+        # Copy it next to the session.log so the full reasoning trace travels with
+        # the project artifacts and lines up with the Fact it produced. session.log
+        # only captured process-level stdout (usually empty for `claude -p`); this
+        # jsonl is where the actual intermediate process is.
+        if not session_id:
+            return
+        import os
+        cwd = os.getcwd()
+        project_dir = "~/.claude/projects/" + cwd.replace("/", "-")
+        src = Path(os.path.expanduser(project_dir)).joinpath(f"{session_id}.jsonl")
+        if not src.is_file():
+            return
+        dst = Path(self._tee_path).parent / "sessions" / f"{session_id}.jsonl"
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            # Auto-render a human-readable markdown alongside the jsonl, so you
+            # never have to hand-run render_session.py for archived sessions.
+            # --live is still manual for realtime watching while the worker runs.
+            self._render_trace_md(dst)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("claude trace copy failed src=%s error=%s", src, exc)
+
+    @staticmethod
+    def _render_trace_md(jsonl_path: Path) -> None:
+        import os
+        import subprocess
+        md_path = jsonl_path.with_suffix(".md")
+        # render_session.py lives at the repo root (dispatcher cwd), not under runs/.
+        renderer = Path(os.getcwd()) / "tools" / "render_session.py"
+        if not renderer.is_file():
+            return
+        try:
+            subprocess.run(
+                [sys.executable, str(renderer), str(jsonl_path), "--out", str(md_path)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                cwd=os.getcwd(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("trace md render failed jsonl=%s error=%s", jsonl_path, exc)
+
+    @staticmethod
+    def _extract_session_id(command: list[str]) -> str | None:
+        for index, arg in enumerate(command):
+            if arg == "--session-id" and index + 1 < len(command):
+                return command[index + 1]
+            if arg == "-r" and index > 0 and command[0] == "claude" and index + 1 < len(command):
+                return command[index + 1]
+        return None
 
     def _read_stream(self, pipe: Any, sink: list[bytes]) -> None:
         try:
@@ -189,6 +284,16 @@ class LocalContainerManager:
         sanitized = project_id.replace("/", "-")
         return f"{self._PREFIX}{sanitized}"
 
+    def _tee_path(self, container_name: str) -> str:
+        # Per-process session log under runs/<project_id>/. Relative to the
+        # dispatcher cwd (repo root), so it lands next to the agent's own
+        # spill-to-disk artifacts.
+        if container_name.startswith(self._PREFIX):
+            project_id = container_name[len(self._PREFIX):]
+        else:
+            project_id = container_name
+        return str(Path("runs").resolve() / project_id / f"session-{uuid.uuid4().hex[:8]}.log")
+
     def ensure_running(self, project_id: str) -> str:
         # Local backend: no container to start. Return the logical name.
         name = self.container_name(project_id)
@@ -213,7 +318,12 @@ class LocalContainerManager:
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
     ) -> LocalManagedProcess:
-        return LocalManagedProcess(command=command, env=env, timeout_seconds=timeout_seconds)
+        return LocalManagedProcess(
+            command=command,
+            env=env,
+            timeout_seconds=timeout_seconds,
+            tee_path=self._tee_path(container_name),
+        )
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
         # Write to the real host filesystem so local worker processes can read
