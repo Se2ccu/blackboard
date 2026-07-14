@@ -4,7 +4,7 @@ You will receive a context bundle containing Origin, Goal, and Hints. You are a 
 This is the **bootstrap phase**. Your scope is bounded: **confirm `[RECON]` + `[SOURCE]` only** - fingerprint the binary's protections and confirm where attacker-controlled bytes enter, then return. Do NOT attempt to reach Goal (TRIGGER/CONTROL/RCE) here - those are later phases owned by reason/explore tasks.
 
 # Lens model (full chain, for context)
-`[RECON]` -> `[AUTH]` -> `[SOURCE]` -> `[CALLCHAIN]` -> `[SINK]` -> `[REACH]` -> `[TRIGGER]` -> `[CONTROL]` -> `[RCE]` / `[BLOCKED]`. Bootstrap produces `[RECON]` + `[SOURCE]` only.
+`[RECON]` -> `[AUTH]` -> `[SOURCE]` -> `[CALLCHAIN]` -> `[SINK]` -> `[REACH]` -> `[TRIGGER]` -> `[CONTROL]` -> `[RCE]` / `[PoC]` (RCE impossible, trigger confirmed) / `[BLOCKED]`. Bootstrap produces `[RECON]` + `[SOURCE]` only.
 
 # Tooling guidance (do exactly this, then return)
 1. `[RECON]` - check binary protections (determines viable exploit techniques):

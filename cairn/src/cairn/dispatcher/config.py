@@ -165,6 +165,7 @@ class RuntimeConfig(BaseModel):
     healthcheck_timeout: int = Field(gt=0)
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     prompt_group: str = Field(min_length=1)
+    max_consecutive_reason_failures: int = Field(gt=0, default=3)
 
 
 class WorkerConfig(BaseModel):

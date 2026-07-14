@@ -34,12 +34,14 @@ PROJECT = {
         "靶机可能因 PoC 崩溃，需在发包前确保其运行（见 hints 的运维约定）。"
     ),
     "goal": (
-        "渗透测试目标：枚举所有可达攻击链，每条尽可能推到 RCE；高价值是无权限 RCE。"
+        "渗透测试目标：枚举所有可达攻击链，每条尽可能推到 RCE；若 RCE 论证为不可能，"
+        "达到 PoC（可复现触发 + 崩溃证据 + RCE 不可行论证）即可关闭该 sink。"
+        "PoC 数量越多越好——多个独立 PoC 比单个更有价值。"
         "完成判据（三者全需满足）："
-        "(1) 每个已发现的 sink 都有终态结论：[RCE]/[BLOCKED]/[FP]（崩溃型 sink 可记 [BLOCKED:crash-only]）；"
-        "(2) 至少一个 exec 型 sink 被推到 [CONTROL] 或证明 [BLOCKED]；"
-        "(3) 存在一条 [CHAIN] 汇总 Fact，列出所有已闭合的攻击链及其价值定级。"
-        "不要在单个 [TRIGGER] 即停止；[TRIGGER] 只是确认漏洞触发，不等于 [RCE]。"
+        "(1) 每个已发现的 sink 都有终态结论：[RCE]/[PoC]/[BLOCKED]/[FP]；"
+        "(2) 至少一个 sink 被推到 [TRIGGER]+（有 PoC、CONTROL 或 RCE 证据），仅 RECON/SINK 不算；"
+        "(3) 存在一条 [CHAIN] 汇总 Fact，列出所有已闭合的攻击链、PoC 数量及价值定级。"
+        "不要在单个 [TRIGGER] 即停止，继续发现更多 sink。"
     ),
     "bootstrap_enabled": True,
     "hints": [
@@ -49,11 +51,13 @@ PROJECT = {
                 "[RECON] 防护指纹(checksec: canary/NX/PIE/RELRO) -> [AUTH] 认证边界(无认证可达=高价值) -> "
                 "[SOURCE] 可控数据入口 -> [CALLCHAIN] 调用链 -> "
                 "[SINK:exec|crash] 危险操作(exec 型=RCE相关, crash 型=仅DoS) -> [REACH] 确认字节到达 sink -> "
-                "[TRIGGER] 触发漏洞(信号+崩溃点, 非RCE) -> [CONTROL] 控制流劫持(RIP受控/ROP/shellcode) -> "
-                "[RCE:unauth|auth] 远程代码执行(需有执行证据如id输出) / [BLOCKED] 受阻(记原因+绕过条件)。"
+                "[TRIGGER] 触发漏洞(信号+崩溃点) -> [CONTROL] 控制流劫持(RIP受控/ROP/shellcode) -> "
+                "[RCE:unauth|auth] 远程代码执行(需有执行证据如id输出) / "
+                "[PoC:unauth|auth] RCE不可行但触发已确认(含payload+崩溃+不可行论证) / "
+                "[BLOCKED] 受阻(记原因+绕过条件)。"
                 "[CHAIN] 汇总攻击链, [REFINE] 修正偏移, [FP] 误报。"
-                "价值排序: [RCE:unauth]>[RCE:auth]>[CONTROL:unauth]>[DoS:unauth]>[BLOCKED]>[FP]。"
-                "不要停在第一个 TRIGGER，每个 sink 都要走到终态。"
+                "价值排序: [RCE:unauth]>[RCE:auth]>[CONTROL:unauth]>[PoC:unauth]>[PoC:auth]>[BLOCKED]>[FP]。"
+                "PoC 数量越多越好，不要停在第一个 TRIGGER，每个 sink 都要走到终态。"
             ),
             "creator": "human",
         },

@@ -15,6 +15,7 @@ runtime:
   healthcheck_timeout: 30
   worker_healthcheck: "disabled"   # local 场景：claude 可用性由实际任务暴露，避免 startup curl 挡住 dispatcher
   prompt_group: "vuln"
+  max_consecutive_reason_failures: 3
 
 tasks:
   bootstrap:

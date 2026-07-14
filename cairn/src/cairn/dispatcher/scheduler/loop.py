@@ -51,6 +51,7 @@ class DispatcherLoop:
         self.runtime_project_ids: set[str] = set()
         self.worker_unhealthy_until: dict[str, float] = {}
         self.worker_rejected_until: dict[tuple[str, str, str], float] = {}
+        self._consecutive_reason_failures: dict[str, int] = {}
         self._log_state: dict[str, tuple[int, str, tuple[object, ...]]] = {}
         self._cleanup_pending: set[str] = set()
         self._inactive_cleanup_done: dict[str, str] = {}
@@ -229,10 +230,21 @@ class DispatcherLoop:
             export_yaml = self.client.export_project(summary.id)
             return self._dispatch_reason(project, export_yaml, "initial")
         if project.project.reason is None:
-            reason_trigger = self._reason_trigger(project)
-            if reason_trigger is not None:
-                export_yaml = self.client.export_project(summary.id)
-                return self._dispatch_reason(project, export_yaml, reason_trigger)
+            reason_failures = self._consecutive_reason_failures.get(project.project.id, 0)
+            if reason_failures >= self.config.runtime.max_consecutive_reason_failures:
+                self._log_changed(
+                    f"{skip_scope}:reason_circuit_breaker",
+                    logging.WARNING,
+                    "skip reason project=%s because consecutive failures=%s reached max=%s",
+                    project.project.id,
+                    reason_failures,
+                    self.config.runtime.max_consecutive_reason_failures,
+                )
+            else:
+                reason_trigger = self._reason_trigger(project)
+                if reason_trigger is not None:
+                    export_yaml = self.client.export_project(summary.id)
+                    return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
         unclaimed_intents = [
             intent
@@ -700,22 +712,35 @@ class DispatcherLoop:
                     )
                 else:
                     self.worker_rejected_until.pop(rejection_key, None)
-                if outcome == "success" and task.task_type == "reason":
-                    assert task.fact_count is not None
-                    assert task.hint_count is not None
-                    assert task.open_intent_count is not None
-                    self.reason_checkpoints[task.project_id] = ReasonCheckpoint(
-                        fact_count=task.fact_count,
-                        hint_count=task.hint_count,
-                        open_intent_count=task.open_intent_count,
-                    )
-                    LOG.debug(
-                        "reason checkpoint updated project=%s facts=%s hints=%s open_intents=%s",
-                        task.project_id,
-                        task.fact_count,
-                        task.hint_count,
-                        task.open_intent_count,
-                    )
+                if task.task_type == "reason":
+                    if outcome == "success":
+                        self._consecutive_reason_failures.pop(task.project_id, None)
+                        assert task.fact_count is not None
+                        assert task.hint_count is not None
+                        assert task.open_intent_count is not None
+                        self.reason_checkpoints[task.project_id] = ReasonCheckpoint(
+                            fact_count=task.fact_count,
+                            hint_count=task.hint_count,
+                            open_intent_count=task.open_intent_count,
+                        )
+                        LOG.debug(
+                            "reason checkpoint updated project=%s facts=%s hints=%s open_intents=%s",
+                            task.project_id,
+                            task.fact_count,
+                            task.hint_count,
+                            task.open_intent_count,
+                        )
+                    elif outcome != "cancelled":
+                        prev = self._consecutive_reason_failures.get(task.project_id, 0)
+                        self._consecutive_reason_failures[task.project_id] = prev + 1
+                        LOG.warning(
+                            "consecutive reason failures project=%s count=%s/%s",
+                            task.project_id,
+                            prev + 1,
+                            self.config.runtime.max_consecutive_reason_failures,
+                        )
+                elif task.task_type in ("explore", "bootstrap") and outcome == "success":
+                    self._consecutive_reason_failures.pop(task.project_id, None)
             except Exception:
                 LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
 
@@ -779,6 +804,9 @@ class DispatcherLoop:
             current_status = inactive_status_by_id.get(project_id)
             if current_status != status:
                 self._inactive_cleanup_done.pop(project_id, None)
+        for project_id in list(self._consecutive_reason_failures):
+            if project_id not in active_ids:
+                self._consecutive_reason_failures.pop(project_id, None)
 
     def _cancel_inactive_tasks(self, summaries: list[ProjectSummary]) -> None:
         status_by_project = {summary.id: summary.status for summary in summaries}

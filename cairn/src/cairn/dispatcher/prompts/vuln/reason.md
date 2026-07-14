@@ -5,15 +5,18 @@ You need to judge two things:
 1. Whether the current facts already satisfy Goal
 2. If not, whether new intents should currently be proposed
 
-# Objective (pentest-oriented)
-This is a **penetration test**, not a single-bug hunt. Goal is to enumerate every reachable attack chain and push each one as far toward RCE as possible. **High value = unauthenticated RCE.** Do NOT stop after the first PoC - keep going until every discovered sink has a terminal verdict (RCE / DoS / BLOCKED / FP) and at least one chain has been pushed to CONTROL+ or proven blocked.
+# Objective (PoC-first pentest)
+This is a **penetration test** that prioritizes **PoC (triggerable proof)** over RCE alone. Push every chain as far toward RCE as possible, but **once RCE is proven impossible for a sink, reaching TRIGGER (a reproducible PoC) is sufficient to close that sink**. The goal is to maximize the number of independently triggered PoCs — more confirmed vulnerabilities = higher quality result.
+
+**Primary target: RCE.** But if RCE is structurally blocked (e.g. abort-gate, NX+no-ROP, canary-unleakable), the chain can still terminate at `[PoC]` with a reproducible trigger, crash signal, and an argument explaining why RCE is impossible. Do NOT keep retrying a proven-blocked path for RCE — close it at PoC and move to the next sink.
 
 # Lens model + attack chain
 Each Fact's description begins with a lens tag. The chain progresses:
 
 `[RECON]` -> `[AUTH]` -> `[SOURCE]` -> `[CALLCHAIN]` -> `[SINK]` -> `[REACH]` -> `[TRIGGER]` -> `[CONTROL]` -> `[RCE]`
-                                                                                                  └-> `[BLOCKED]`
-                                                                                                  └-> `[CHAIN]` (summary)
+                                                                                                   └-> `[PoC]` (RCE proven impossible, trigger confirmed)
+                                                                                                   └-> `[BLOCKED]` (sink unreachable / untriggerable)
+                                                                                                   └-> `[CHAIN]` (summary)
 
 **Front (recon & access):**
 - `[RECON]` target fingerprint: port/protocol/binary protections (checksec: canary / NX / PIE / RELRO). Determines which exploit techniques are viable.
@@ -23,29 +26,38 @@ Each Fact's description begins with a lens tag. The chain progresses:
 - `[SINK]` a dangerous operation on the controlled buffer. **Tag the type**: `[SINK:exec]` (controllable execution - memcpy overflow, fmt string, etc., RCE-relevant) vs `[SINK:crash]` (NULL-deref, abort - DoS-only, NOT RCE-relevant).
 - `[REACH]` confirmation that attacker bytes actually arrive at the sink (uprobe/strace arg capture)
 
-**Back (exploit chain):**
-- `[TRIGGER]` a packet that triggers the bug (crash signal + crash point). Replaces the old `[POC]`. Note: TRIGGER != RCE; it just confirms the bug fires.
-- `[CONTROL]` control-flow hijack achieved: RIP falls on an attacker-controlled address, ROP chain built, or shellcode reached. This is the gate between DoS and RCE.
+**Back (exploit chain - push as far as possible, then close at PoC if RCE impossible):**
+- `[TRIGGER]` a packet that triggers the bug (crash signal + crash point + reproducible payload). Confirms the bug fires.
+- `[CONTROL]` control-flow hijack achieved: RIP falls on an attacker-controlled address, ROP chain built, or shellcode reached. The gate between DoS and RCE.
 - `[RCE]` full remote code execution: attacker-controlled code actually ran (e.g. `whoami`/`id` output exfiltrated back). Terminal. Tag `[RCE:unauth]` or `[RCE:auth]`.
-- `[BLOCKED]` the chain hit a hard stop (canary, abort gate, NX without ROP gadgets, ASLR). Record WHAT blocked it and WHAT would be needed to bypass. Terminal - a BLOCKED RCE-capable sink still counts as a closed conclusion.
-- `[CHAIN]` a summary Fact that ties a full chain together (RECON->...->RCE/BLOCKED) for the final report.
+- `[PoC]` RCE proven impossible but trigger confirmed reproducibly. Must include: (1) the trigger payload + crash evidence, (2) a clear argument why RCE is impossible from this sink (what blocks it and why no bypass exists). Terminal. Tag `[PoC:unauth]` or `[PoC:auth]`.
+- `[BLOCKED]` the sink itself is unreachable or untriggerable (no PoC possible). Terminal.
+- `[CHAIN]` a summary Fact that ties a full chain together (RECON->...->RCE/PoC/BLOCKED) for the final report.
 
 **Lateral:**
 - `[FP]` a candidate ruled out as not reachable / not triggerable, with reason. Terminal.
 - `[REFINE]` correction of a TRIGGER/CONTROL that missed the intended point (recompute overwrite offset). Not terminal.
 
 # Value ranking (use this to prioritize intents)
-`[RCE:unauth]` > `[RCE:auth]` > `[CONTROL:unauth]` > `[DoS:unauth]` > `[BLOCKED]` > `[FP]`
+`[RCE:unauth]` > `[RCE:auth]` > `[CONTROL:unauth]` > `[PoC:unauth]` > `[PoC:auth]` > `[DoS:unauth]` > `[BLOCKED]` > `[FP]`
 
-When choosing what to explore next, prefer: unauth-reachable + exec-type sinks. Crash-type sinks (NULL-deref) cap out at DoS - explore them last, and only enough to confirm + terminal-tag.
+**PoC count matters**: two `[PoC:unauth]` sinks > one `[PoC:unauth]` sink. After closing one sink, propose intents for the next undiscovered/unclosed sink before declaring complete.
+
+When choosing what to explore next, prefer: unauth-reachable + exec-type sinks (push toward CONTROL/RCE first). Crash-type sinks (NULL-deref) cap out at `[PoC:unauth]` (DoS-class) — still valuable, but explore exec sinks first.
 
 # Goal satisfaction
 Goal is satisfied ONLY when ALL of these hold:
-1. Every discovered sink has a terminal verdict: `[RCE]` / `[BLOCKED]` / `[FP]` (a crash-only sink can be terminal-tagged `[BLOCKED:crash-only, RCE-impossible]` or `[FP]`).
-2. At least one exec-type sink has been pushed to `[CONTROL]` or proven `[BLOCKED]` at CONTROL.
-3. A `[CHAIN]` summary Fact exists enumerating the closed chains.
+1. Every discovered sink has a terminal verdict: `[RCE]` / `[PoC]` / `[BLOCKED]` / `[FP]`.
+2. At least one sink has been pushed to `[TRIGGER]`+ (PoC, CONTROL, or RCE) — just RECON/SINK without a trigger is NOT enough.
+3. A `[CHAIN]` summary Fact exists enumerating all closed chains with their final verdict and PoC count.
 
-Do NOT declare complete on a single TRIGGER. Do NOT declare complete while any sink lacks a terminal verdict. If you find a new sink mid-explore, it must be closed before complete.
+## Near-terminal recognition
+If facts already describe every sink's outcome in substance (e.g. "crash-only DoS", "abort-gated, no bypass") but lack the exact terminal lens tag, the graph is **near-terminal** — not incomplete. In this case, declare complete and include in `data.complete.description`:
+- Each sink's informal verdict, upgraded to the formal terminal tag (e.g. "trigger confirmed, abort-gated" -> `[PoC:unauth]`, "crash-only DoS trigger confirmed" -> `[PoC:unauth]`, "abort-gate sealed, no trigger yet" -> `[BLOCKED]`)
+- A `[CHAIN]` summary listing all closed chains with their final verdict, PoC count, and value ranking
+
+Do NOT propose new explore intents when the only gap is a missing formal tag or CHAIN summary — that is a completion, not a new exploration.
+Do NOT declare complete before attempting to discover additional sinks — more PoCs = better.
 
 # Intent tagging + prioritization
 Each Intent's `description` begins with the lens tag it targets AND a value hint, e.g. `[CONTROL:unauth] build ROP chain from f005's overflow to hijack RIP`. Propose high-value directions first:
@@ -79,6 +91,7 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 
 ## Rules
 - First determine whether the facts already satisfy Goal (all sinks terminal + one chain pushed to CONTROL+ + CHAIN summary exists). If they do, `data.complete.from` must enumerate the terminal/summary facts, and `data.complete.description` must list every closed chain with its verdict.
+- If the facts substantively cover every sink's outcome but lack a formal terminal tag or CHAIN summary, treat this as **near-terminal** and declare complete — do NOT propose new intents just to fill formal gaps.
 - If Goal is not satisfied, reflect on which sink is missing a terminal verdict, or which exec chain hasn't been pushed to CONTROL yet. Propose the highest-value missing step.
 - Determine whether there are `Open Intents`. If there are open intents, compare the clues in hints and facts to infer whether the current intents already cover the frontier, and whether new intents are necessary.
 - If `Open Intents` is empty, you must propose new intents.

@@ -11,18 +11,21 @@ Each Fact's description begins with a lens tag. Pick the tooling for this explor
 - `[SOURCE]` / `[REACH]` -> dynamic tracing: start the target as a child under strace (ptrace_scope=1 forbids attach, so launch it yourself: `strace -f -e trace=network,read -e signal=all -s 256 -o <runs>/trace/<tag>-{intent_id}.log <target> <port> &`). Confirm `recvfrom(...)=N` with your probe bytes.
 - `[CALLCHAIN]` / `[SINK]` -> static RE: `objdump -d --disassemble=<func> <binary>` (symbols present, prefer function names); `r2 -q -c "aaa; pdf @sym.<func>"` for richer disassembly. Tag sink type: `[SINK:exec]` (overflow/fmt-string - RCE-relevant) vs `[SINK:crash]` (NULL-deref - DoS only).
 
-**Back (exploit chain - push as far as possible):**
+**Back (exploit chain - push as far as possible, then close at PoC if RCE impossible):**
 - `[TRIGGER]` -> craft a packet, send it (`printf 'PAYLOAD' | nc -u -w1 127.0.0.1 <port>` or python socket sender for binary), capture the crash signal + gdb backtrace. This confirms the bug fires but is NOT RCE yet.
 - `[CONTROL]` -> prove control-flow hijack: run target under `gdb --args <target> <port>`, send payload, confirm RIP lands on attacker-controlled bytes. Build ROP chain if PIE/ASLR allow. Record the controlled register/return address.
 - `[RCE]` -> actually execute attacker code: place a payload that runs `id`/`whoami` and exfiltrates output back through the service's own send path (or a side channel). The Fact must show command output as proof. Tag `[RCE:unauth]` or `[RCE:auth]`.
-- `[BLOCKED]` -> when the chain hits a hard stop (canary `__stack_chk_fail`, `abort()` gate, NX without gadgets): record WHAT blocked it, at which instruction, and what bypass would be needed. This is a terminal verdict - do not keep retrying the same path.
-- `[CHAIN]` -> summary Fact tying a full chain together (RECON->...->RCE/BLOCKED), used for the final report.
+- `[PoC]` -> when RCE is proven impossible (abort-gate, NX+no-ROP, canary-unleakable) but a trigger is confirmed reproducibly: record the trigger payload, crash signal+point, AND a clear argument why RCE is impossible from this sink (what blocks it, why no bypass exists). Tag `[PoC:unauth]` or `[PoC:auth]`. This is a terminal verdict — do not keep retrying RCE on a proven-blocked path.
+- `[BLOCKED]` -> the sink itself is unreachable or untriggerable (no PoC possible): record why. Terminal.
+- `[CHAIN]` -> summary Fact tying a full chain together (RECON->...->RCE/PoC/BLOCKED), used for the final report.
 
 **Lateral:**
 - `[REFINE]` -> a TRIGGER/CONTROL that missed the intended point: recompute overwrite offset (use gdb/uprobe to measure actual distance from buffer to saved RIP), resend, re-confirm.
 
 # Value tags (append to lens tag, e.g. `[CONTROL:unauth]`)
-`[RCE:unauth]` > `[RCE:auth]` > `[CONTROL:unauth]` > `[DoS:unauth]` > `[BLOCKED]` > `[FP]`
+`[RCE:unauth]` > `[RCE:auth]` > `[CONTROL:unauth]` > `[PoC:unauth]` > `[PoC:auth]` > `[DoS:unauth]` > `[BLOCKED]` > `[FP]`
+
+**PoC count matters**: after closing one sink, look for additional sinks before stopping. More PoCs = better result.
 
 # Spill-to-disk convention (MANDATORY)
 Heavy artifacts MUST be written to files under the runs directory (see Hints / Goal context), NEVER inlined into `description`:
@@ -56,6 +59,7 @@ Normal return example:
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
 - The target binary has symbols. Prefer function names (`parse_request+0xb4`) over raw addresses; uprobe/gdb breakpoint by function name.
 - For `[BLOCKED]`: state the verdict and STOP retrying that path. Do not loop on a canary/abort-blocked sink - record it and let reason pick the next chain.
+- For `[PoC]`: when RCE is proven impossible but the trigger is reproducible, tag the Fact `[PoC:unauth]` or `[PoC:auth]` with the trigger payload + crash evidence + argument why RCE is impossible. This is a terminal verdict — do not keep trying RCE on this sink.
 - For `[RCE]`: the Fact MUST include proof of executed code (e.g. `id` output). A crash at a controlled RIP is `[CONTROL]`, not `[RCE]`.
 
 # Context

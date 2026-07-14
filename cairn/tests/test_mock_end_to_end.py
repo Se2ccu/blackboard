@@ -256,6 +256,7 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
     loop.runtime_project_ids = set()
     loop.worker_unhealthy_until = {}
     loop.worker_rejected_until = {}
+    loop._consecutive_reason_failures = {}
     loop._log_state = {}
     loop._cleanup_pending = set()
     loop._inactive_cleanup_done = {}

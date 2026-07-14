@@ -18,6 +18,7 @@ def _loop() -> DispatcherLoop:
     loop.cleanup_futures = {}
     loop._cleanup_pending = set()
     loop._inactive_cleanup_done = {}
+    loop._consecutive_reason_failures = {}
     loop.worker_unhealthy_until = {}
     loop.worker_rejected_until = {}
     loop._log_state = {}
