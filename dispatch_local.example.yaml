@@ -1,0 +1,48 @@
+# Cairn dispatcher 配置模板 - 本地执行后端 + claudecode 真实调用
+# 复制为 dispatch_local.yaml 并填入真实的 ANTHROPIC_* 值后使用：
+#   cp dispatch_local.example.yaml dispatch_local.yaml
+# 运行（两个终端）：
+#   uv run --project cairn cairn serve
+#   uv run --project cairn cairn dispatch --config dispatch_local.yaml
+
+server: "http://127.0.0.1:8000"
+
+runtime:
+  interval: 3
+  max_workers: 2
+  max_running_projects: 1
+  max_project_workers: 2
+  healthcheck_timeout: 30
+  worker_healthcheck: "disabled"   # local 场景：claude 可用性由实际任务暴露，避免 startup curl 挡住 dispatcher
+  prompt_group: "vuln"
+
+tasks:
+  bootstrap:
+    timeout: 600           # 真实 RE/发包/bpftrace 远超原 8s
+    conclude_timeout: 120
+  reason:
+    timeout: 120
+    max_intents: 2
+  explore:
+    timeout: 600
+    conclude_timeout: 120
+
+container:
+  backend: "local"            # 关键：用本地执行后端，不起 Docker
+  image: "ignored-in-local-backend"
+  network_mode: "host"
+  completed_action: "stop"
+
+common_env: {}
+
+workers:
+  - name: "vuln-researcher"
+    type: "claudecode"
+    task_types: [reason, explore, bootstrap]
+    max_running: 1
+    priority: 0
+    env:
+      # 填入一个兼容 Anthropic /v1/messages 的网关。claude CLI 与 worker 子进程共用这些值。
+      ANTHROPIC_MODEL: "<model-id>"
+      ANTHROPIC_BASE_URL: "<https://your-anthropic-compatible-gateway>"
+      ANTHROPIC_AUTH_TOKEN: "<your-token>"

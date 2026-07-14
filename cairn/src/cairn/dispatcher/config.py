@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 TaskType = Literal["reason", "explore", "bootstrap"]
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
+ContainerBackend = Literal["docker", "local"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 
@@ -149,6 +150,7 @@ class TasksConfig(BaseModel):
 
 
 class ContainerConfig(BaseModel):
+    backend: ContainerBackend = "docker"
     image: str
     network_mode: str
     completed_action: CompletedAction

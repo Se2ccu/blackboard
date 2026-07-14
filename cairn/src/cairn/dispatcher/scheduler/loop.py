@@ -13,6 +13,7 @@ from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
+from cairn.dispatcher.runtime.local_runtime import LocalContainerManager
 from cairn.dispatcher.runtime.startup_healthcheck import format_failure_summary, run_startup_healthchecks
 from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
@@ -41,7 +42,7 @@ class DispatcherLoop:
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
         self.client = CairnClient(self.config.server)
-        self.container_manager = ContainerManager(self.config.container)
+        self.container_manager = self._build_container_manager(self.config.container)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
         self.futures: dict[Future[str], RunningTask] = {}
@@ -68,6 +69,14 @@ class DispatcherLoop:
         self.cleanup_executor.shutdown(wait=True)
         self.container_manager.close()
         self.client.close()
+
+    @staticmethod
+    def _build_container_manager(container_config):
+        backend = getattr(container_config, "backend", "docker")
+        if backend == "local":
+            LOG.info("using local execution backend (no Docker)")
+            return LocalContainerManager(container_config)
+        return ContainerManager(container_config)
 
     def run(self, once: bool = False) -> None:
         try:
