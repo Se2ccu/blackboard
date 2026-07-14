@@ -1,0 +1,195 @@
+/*
+ * udp_recv_trace.bt - 动态跟踪 UDP 收包完整内核路径
+ *
+ * 捕获 nc 发出 UDP 包后，从 softirq 收包到用户态 recvfrom 返回
+ * 的完整函数调用流，按 udp_receiver 进程过滤。
+ *
+ * 路径覆盖：
+ *   softirq:
+ *     net_rx_action -> netif_receive_skb -> ip_rcv ->
+ *     ip_local_deliver -> ip_local_deliver_finish ->
+ *     udp_rcv(=__udp4_lib_rcv) -> __udp4_lib_lookup ->
+ *     udp_unicast_rcv_skb -> udp_queue_rcv_one_skb ->
+ *     __udp_enqueue_schedule_skb -> sock_def_readable (唤醒)
+ *
+ *   用户态 (comm == "udp_receiver"):
+ *     __x64_sys_recvfrom -> __sys_recvfrom -> sock_recvmsg ->
+ *     inet_recvmsg -> udp_recvmsg -> skb_copy_datagram_iter
+ *
+ * 用法: sudo bpftrace udp_recv_trace.bt
+ */
+
+BEGIN
+{
+    printf("===== udp_recv_trace started =====\n");
+    printf("watch: nc -u 127.0.0.1 9000  (in another terminal: ./udp_receiver 9000)\n\n");
+    @start = nsecs;
+}
+
+/* ---------- 软中断 / 协议栈入口 ---------- */
+kprobe:net_rx_action
+{
+    @in_napi = 1;
+}
+
+kretprobe:net_rx_action
+{
+    @in_napi = 0;
+}
+
+kprobe:netif_receive_skb
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | netif_receive_skb skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+/* ---------- IP 层 ---------- */
+kprobe:ip_rcv
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | ip_rcv skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:ip_local_deliver
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | ip_local_deliver skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:ip_local_deliver_finish
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | ip_local_deliver_finish skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+/* ---------- UDP 层 ---------- */
+kprobe:udp_rcv
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | >>> udp_rcv skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:__udp4_lib_rcv
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | __udp4_lib_rcv skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:__udp4_lib_lookup
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | __udp4_lib_lookup (find socket)\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kretprobe:__udp4_lib_lookup
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | __udp4_lib_lookup -> sock=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, retval);
+}
+
+kprobe:udp_unicast_rcv_skb
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | udp_unicast_rcv_skb skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:udp_queue_rcv_one_skb
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | udp_queue_rcv_one_skb skb=%x\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:__udp_enqueue_schedule_skb
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | __udp_enqueue_schedule_skb (enqueue)\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kretprobe:__udp_enqueue_schedule_skb
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | __udp_enqueue_schedule_skb -> rc=%d\n",
+        (nsecs - @start) / 1000000, cpu, comm, retval);
+}
+
+kprobe:sock_def_readable
+/@in_napi/
+{
+    printf("[t=%d] cpu=%d %s | sock_def_readable (wake up waiter)\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+/* ---------- 用户态 syscall 侧（按进程过滤） ---------- */
+kprobe:__x64_sys_recvfrom
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | >>> syscall recvfrom entry\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kprobe:__sys_recvfrom
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | __sys_recvfrom fd=%d\n",
+        (nsecs - @start) / 1000000, cpu, comm, arg0);
+}
+
+kprobe:sock_recvmsg
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | sock_recvmsg\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kprobe:inet_recvmsg
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | inet_recvmsg\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kprobe:udp_recvmsg
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | >>> udp_recvmsg (copy to user)\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kprobe:skb_copy_datagram_iter
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | skb_copy_datagram_iter (copy to user buf)\n",
+        (nsecs - @start) / 1000000, cpu, comm);
+}
+
+kretprobe:udp_recvmsg
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | udp_recvmsg -> ret=%d\n",
+        (nsecs - @start) / 1000000, cpu, comm, retval);
+}
+
+kretprobe:__x64_sys_recvfrom
+/comm == "udp_receiver"/
+{
+    printf("[t=%d] cpu=%d %s | <<< syscall recvfrom -> ret=%d\n",
+        (nsecs - @start) / 1000000, cpu, comm, retval);
+}
+
+END
+{
+    printf("\n===== udp_recv_trace ended =====\n");
+    clear(@start);
+    clear(@in_napi);
+}
