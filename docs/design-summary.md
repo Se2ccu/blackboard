@@ -401,3 +401,113 @@ Artifacts: runs/bpftrace_udp/{poc/poc_magic_sigsegv_002.bin,
 
 3. **runs 目录命名用了 `bpftrace_udp` 而非 project_id**：agent 没严格按 hint 里 `runs/<project_id>/` 建，而是用了靶机名。hint 约定需强化，或在 prompt 里直接给出绝对路径变量。
 
+---
+
+## 十三、运行时进程拓扑：到底几个 agent
+
+### 13.1 三个层面的实体
+
+运行时实际存在三种进程，只有第三种才叫"agent"：
+
+| 实体 | 是什么 | 生命周期 | 数量 |
+|------|--------|----------|------|
+| **server** | `cairn serve`，SQLite 黑板 + HTTP API | 长驻 | 1 |
+| **dispatcher** | `cairn dispatch`，轮询 + fork 任务 | 长驻 | 1 |
+| **agent** | 一次 `claude` 子进程 | 一次性，跑完即退 | 取决于配置 |
+
+### 13.2 没有 subagent
+
+`vuln` prompt_group 通篇指示 agent 直接调 shell 工具（checksec / readelf / objdump / r2 / strace / gdb / nc）后返回一个 JSON，**不使用 Claude Code 的 Task / subagent 机制**。所有 `claude` 进程都是 dispatcher 用 subprocess fork 的顶层调用，彼此平级，谁也不是谁的 subagent。agent 之间也不直接通信，只通过黑板（SQLite）间接协作——即第一节的信息素协调。
+
+### 13.3 本配置实际并发 = 1
+
+`dispatch_local.yaml`：1 个 worker（`vuln-researcher`）+ `max_running: 1` + `max_running_projects: 1`。任一时刻最多 1 个 claude 进程在跑，reason 与 explore 串行交替，而非并行。按任务类型数进程：
+
+| 任务 | claude 进程数 | 命令 |
+|------|--------------|------|
+| reason | 1 | `claude --session-id <uuid> -p -- <prompt>` |
+| bootstrap / explore | 2（先后）| execute `claude --session-id <uuid> -p` → conclude `claude -r <uuid> -p` |
+
+### 13.4 进程关系
+
+```
+        server (黑板: SQLite)
+        ▲ HTTP 读写
+        │
+        dispatcher (每 3s 轮询: 看图状态 -> 派 reason / explore)
+        │ subprocess fork (一次一个)
+        ▼
+        claude A (reason)  →退出→  claude B (explore execute)  →退出→  claude B' (explore conclude, -r 续 session)
+```
+
+explore / bootstrap 的两阶段共用一个 session id：execute 跑完退出，conclude 用 `claude -r <uuid>` resume 其上下文。这是**同一 agent 的两个回合**（读 session 文件，不是活着的父进程），不是父子 agent 关系。reason 单进程单回合，无 conclude。
+
+### 13.5 并发旋钮（4 个 cap）
+
+| 参数 | 含义 | 本配置 |
+|------|------|--------|
+| `runtime.max_workers` | 全局线程池硬上限 | 2 |
+| `runtime.max_running_projects` | 同时几个项目 | 1 |
+| `runtime.max_project_workers` | 单项目并发任务数 | 2 |
+| `workers[].max_running` | 单 worker 并发数 | 1 |
+
+约束：`max_project_workers <= max_workers`。真正的并行是"同一项目的多个 open intent 被多个 explore 同时消费"，受 `reason.max_intents`（每轮产出 intent 数）与上述 4 个 cap 共同限制。reason 是 per-project 互斥锁（projects 表 `reason_worker` 列），同一项目任一时刻只能 1 个 reason；explore 是 per-intent 认领，可并行。
+
+> 注：本仓库靶机单端口（:9090）下并行 explore 会互相踩——bind 冲突、strace / gdb 争抢同一进程、trace 日志互串。要真正吃下并行需 docker backend（每项目独立容器 + 网络隔离）或多项目并行（各自独立 target 实例）。`dispatch_local.yaml` 的 local 单端口场景，并行收益有限。
+
+---
+
+## 十四、与 agent + subagent 调度范式的对比
+
+### 14.1 核心区别
+
+- **黑板报**：协调逻辑是**代码**（scheduler），agent 是被调度的工人，通过**中心化持久状态**（SQLite 黑板）间接协作。
+- **agent + subagent**：协调逻辑是 **LLM 自身**（root agent），subagent 是 root 派生的子单元，通过 **root 的 context** 综合结果。
+
+同样是"多 agent 协作"，谁来当协调者、状态存哪，是分水岭。
+
+### 14.2 维度对比
+
+| 维度 | 黑板报（cairn） | agent + subagent |
+|------|----------------|------------------|
+| 协调者 | 外部 scheduler 代码 | root agent 自己 |
+| 状态载体 | SQLite 黑板（持久化） | root 的 context window |
+| agent 关系 | 全部平级，不直接通信 | 父子树，结果回传 root |
+| 可见性 | 看不到彼此在跑，但能读沉淀的 fact | subagent 间不可见，只经 root 中转 |
+| 任务结构 | 固定 schema（reason / explore / bootstrap） | 自由，root 任意描述子任务 |
+| 并行控制 | 代码精确管理（4 个 cap） | root 决定，受平台上限约束 |
+| 持久化 / 恢复 | 黑板是 source of truth，crash 可续跑 | context 是 source of truth，root 崩全丢 |
+| 可观测性 | 黑板可 SQL 查、web 可视化图 | 依赖 root 转述或平台事件流 |
+| context 压力 | 每个 agent 只看快照，不膨胀 | root context 随子任务结果累积膨胀 |
+| 容错 | 单 agent 失败只丢一个任务 | subagent 失败 root 重试；root 失败整树崩 |
+| 异构 worker | 天然支持（claude / codex / pi / mock 混用） | 较难，通常同模型同驱动 |
+
+### 14.3 黑板报的优缺点
+
+**优点**：可恢复可审计（黑板是数据库，进程死了重启续跑）；协调确定可调试（scheduler 是代码，可单测）；context 不爆（每个 agent 冷启动只看快照）；容错粒度细（一个 explore 失败只丢一个 intent）；异构混用；并行精确可控。
+
+**缺点**：schema 僵硬（加工作模式要改协议 / prompt / 校验）；协调不智能（只按固定规则触发，无多步前瞻规划）；agent 无跨任务累积记忆；无实时协商；前期成本高（要设计状态结构、prompt 模板、调度规则、API 协议）。
+
+### 14.4 subagent 的优缺点
+
+**优点**：灵活、启动快（无需预定义 schema）；root 全局视野；动态重规划；实现成本低（一个 Task 调用即 fan-out）。
+
+**缺点**：context 膨胀；不可恢复（root 崩全丢）；可观测性弱；容错粗（root 单点）；协调不稳定（拆解质量随 root 能力波动）；并行度不可控。
+
+### 14.5 适用场景
+
+| 场景 | 选谁 |
+|------|------|
+| 长周期（小时~天）、断点续跑、要审计 | 黑板报 |
+| 短周期（分钟）、开放式、一次性、快速原型 | subagent |
+| 多异构模型协作、精确控并发 | 黑板报 |
+| 单模型、灵活拆解、动态重规划 | subagent |
+
+### 14.6 对本仓库选择的解读
+
+漏洞挖掘命中全是黑板报的强项：**长周期**（一次 RCE 链几十轮 reason↔explore，几小时）；**要审计**（每个 fact 留痕，`runs/` 落盘可复盘整条链）；**要断点续跑**（dispatcher 重启读 SQLite 续推）；**异构**（example 配置三家模型混用）；**context 隔离**（每个 explore 只看当前 intent + 图快照，跑几十轮不爆）。
+
+若用 subagent 做同件事：root 要在一个 context 里维护整条 exploit 链的中间产物（strace 日志、反汇编、payload 字节），几十轮必爆；root 崩则整条链归零，没有 `runs/` + 黑板这种"进度已落盘"的安全感。
+
+**一句话**：黑板报用"工程化的确定性"换掉 subagent 的"灵活但不可控"，在长周期、高状态、要审计的场景下划算；subagent 在短平快、开放式场景更轻。本仓库目标（无权限 RCE 闭环）属前者，故选黑板报。
+
