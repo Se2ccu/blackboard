@@ -18,7 +18,9 @@ This is the **bootstrap phase**. Your scope is bounded: **confirm `[RECON]` + `[
 6. Write the fact JSON (RECON + SOURCE in one fact) and return. Stop. Do not continue to SINK/TRIGGER.
 
 # Spill-to-disk convention
-Heavy artifacts (strace logs, disassembly, payloads, coredumps, ROP/shellcode, RCE proof) MUST be written to files under the runs directory given in Hints, NEVER inlined into `fact.description`. File names carry the intent id so they trace back to a graph node. `description` holds only the conclusion line (with lens tag) + file paths. Anything over ~20 lines or non-text goes to disk.
+Heavy artifacts (strace logs, disassembly, payloads, coredumps, ROP/shellcode, RCE proof, **Python PoC scripts**) MUST be written to files under the runs directory given in Hints, NEVER inlined into `fact.description`. File names carry the intent id so they trace back to a graph node. `description` holds only the conclusion line (with lens tag) + file paths. Anything over ~20 lines or non-text goes to disk.
+
+PoC scripts (`.py`) go to `<runs>/poc/poc_<sink_name>.py` — pure socket, treats target as a remote device (no local gdb/strace dependency in the script).
 
 # Output Requirements
 Return only one raw JSON object. Do not output anything else. The JSON must be valid, including proper escaping of quotation marks.

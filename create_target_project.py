@@ -67,6 +67,9 @@ PROJECT = {
                 "（trace/asm/poc/crash/notes），文件名带 intent_id 以回溯图节点。"
                 "description 只放结论行（lens+价值标签 + 地址/偏移/信号/RIP/RCE输出）+ 文件路径引用，"
                 "不内联大段日志/反汇编/payload。RCE 的执行证据也要落盘（crash/rce-<intent>.out）。"
+                "PoC 归档要求：每个 [TRIGGER]/[PoC]/[RCE]/[CONTROL] 必须产出独立可运行的"
+                " Python 脚本（pure socket，把靶机当远端设备，不依赖本地 gdb/strace），"
+                "路径 runs/<project_id>/poc/poc_<sink_name>.py，description 里引用该路径。"
             ),
             "creator": "human",
         },

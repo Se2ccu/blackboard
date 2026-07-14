@@ -171,9 +171,9 @@ class LocalManagedProcess:
                 f"command: {shlex.join(self.command)[:500]}",
             ]
             if session_id:
-                lines.append(
-                    f"session_id: {session_id}  (resume full reasoning: claude -r {session_id} --resume)"
-                )
+                resume_hint = self._resume_hint(session_id)
+                if resume_hint:
+                    lines.append(f"session_id: {session_id}  (resume full reasoning: {resume_hint})")
             lines.extend(["--- stdout ---", stdout_text or "(empty)"])
             lines.extend(["--- stderr ---", stderr_text or "(empty)"])
             lines.append(
@@ -181,9 +181,38 @@ class LocalManagedProcess:
                 f"cancelled={self._cancel_reason is not None} ---"
             )
             Path(self._tee_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-            self._copy_claude_trace(session_id)
+            self._copy_trace(session_id, stdout_text)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("tee write failed path=%s error=%s", self._tee_path, exc)
+
+    def _copy_trace(self, session_id: str | None, stdout_text: str) -> None:
+        """Copy the full reasoning trace next to the session log."""
+        if not session_id:
+            return
+        # claude stores full reasoning in ~/.claude/projects/<cwd-dashes>/<id>.jsonl
+        # opencode stores full reasoning in stdout (JSON event stream)
+        if self.command and self.command[0] == "claude":
+            self._copy_claude_trace(session_id)
+        elif self.command and self.command[0] == "opencode":
+            self._copy_opencode_trace(session_id, stdout_text)
+
+    def _copy_opencode_trace(self, session_id: str, stdout_text: str) -> None:
+        """opencode emits full reasoning as JSON events on stdout.
+        Save the raw JSONL alongside the session log for traceability."""
+        if not stdout_text.strip():
+            return
+        dst = Path(self._tee_path).parent / "sessions" / f"{session_id}.jsonl"
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(stdout_text, encoding="utf-8")
+            self._render_trace_md(dst)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("opencode trace copy failed error=%s", exc)
+
+    @staticmethod
+    def _resume_hint(session_id: str) -> str | None:
+        """Return a CLI resume hint string for the session, or None."""
+        return f"opencode run -s {session_id} --auto --format json"
 
     def _copy_claude_trace(self, session_id: str | None) -> None:
         # The real step-by-step reasoning (thinking / tool_use / tool_result) lives
@@ -235,9 +264,13 @@ class LocalManagedProcess:
     @staticmethod
     def _extract_session_id(command: list[str]) -> str | None:
         for index, arg in enumerate(command):
+            # claude: --session-id <id> or -r <id>
             if arg == "--session-id" and index + 1 < len(command):
                 return command[index + 1]
             if arg == "-r" and index > 0 and command[0] == "claude" and index + 1 < len(command):
+                return command[index + 1]
+            # opencode: -s <id>
+            if arg == "-s" and index > 0 and command[0] == "opencode" and index + 1 < len(command):
                 return command[index + 1]
         return None
 

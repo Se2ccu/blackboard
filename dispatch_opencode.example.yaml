@@ -1,0 +1,53 @@
+# Cairn dispatcher 配置模板 - 本地执行后端 + opencode CLI 真实调用
+# 复制为 dispatch_opencode.yaml 并填入真实值后使用：
+#   cp dispatch_opencode.example.yaml dispatch_opencode.yaml
+# 运行（两个终端）：
+#   uv run --project cairn cairn serve
+#   uv run --project cairn cairn dispatch --config dispatch_opencode.yaml
+#
+# opencode CLI 需先安装并配置好 provider/model：
+#   ~/.config/opencode/opencode.json  (配置 provider/baseURL/apiKey/model)
+#   export PATH="$HOME/.opencode/bin:$PATH"
+
+server: "http://127.0.0.1:8000"
+
+runtime:
+  interval: 3
+  max_workers: 2
+  max_running_projects: 1
+  max_project_workers: 2
+  healthcheck_timeout: 30
+  worker_healthcheck: "disabled"
+  prompt_group: "vuln"
+  max_consecutive_reason_failures: 3
+
+tasks:
+  bootstrap:
+    timeout: 600
+    conclude_timeout: 120
+  reason:
+    timeout: 300
+    max_intents: 2
+  explore:
+    timeout: 600
+    conclude_timeout: 120
+
+container:
+  backend: "local"
+  image: "ignored-in-local-backend"
+  network_mode: "host"
+  completed_action: "stop"
+
+common_env: {}
+
+workers:
+  - name: "vuln-researcher"
+    type: "opencode"
+    task_types: [reason, explore, bootstrap]
+    max_running: 1
+    priority: 0
+    env:
+      # OPENCODE_MODEL 格式: provider/model (如 aliyun/glm-5.2)
+      OPENCODE_MODEL: "aliyun/glm-5.2"
+      # provider 名 (与 opencode.json 中 provider key 一致)
+      OPENCODE_PROVIDER: "aliyun"

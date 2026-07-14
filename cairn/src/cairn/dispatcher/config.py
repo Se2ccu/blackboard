@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["reason", "explore", "bootstrap"]
-WorkerType = Literal["claudecode", "codex", "pi", "mock"]
+WorkerType = Literal["claudecode", "opencode", "codex", "pi", "mock"]
 ContainerBackend = Literal["docker", "local"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
@@ -21,6 +21,10 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
         "ANTHROPIC_MODEL",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
+    ),
+    "opencode": (
+        "OPENCODE_MODEL",
+        "OPENCODE_PROVIDER",
     ),
     "codex": (
         "CODEX_MODEL",

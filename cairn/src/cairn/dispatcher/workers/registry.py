@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from cairn.dispatcher.workers.adapters import ClaudeCodeDriver, CodexDriver, MockDriver, PiDriver
+from cairn.dispatcher.workers.adapters import ClaudeCodeDriver, CodexDriver, MockDriver, OpenCodeDriver, PiDriver
 from cairn.dispatcher.workers.base import WorkerDriver
 
 
 DRIVERS: dict[str, WorkerDriver] = {
     "claudecode": ClaudeCodeDriver(),
+    "opencode": OpenCodeDriver(),
     "codex": CodexDriver(),
     "pi": PiDriver(),
     "mock": MockDriver(),

@@ -12,10 +12,10 @@ Each Fact's description begins with a lens tag. Pick the tooling for this explor
 - `[CALLCHAIN]` / `[SINK]` -> static RE: `objdump -d --disassemble=<func> <binary>` (symbols present, prefer function names); `r2 -q -c "aaa; pdf @sym.<func>"` for richer disassembly. Tag sink type: `[SINK:exec]` (overflow/fmt-string - RCE-relevant) vs `[SINK:crash]` (NULL-deref - DoS only).
 
 **Back (exploit chain - push as far as possible, then close at PoC if RCE impossible):**
-- `[TRIGGER]` -> craft a packet, send it (`printf 'PAYLOAD' | nc -u -w1 127.0.0.1 <port>` or python socket sender for binary), capture the crash signal + gdb backtrace. This confirms the bug fires but is NOT RCE yet.
-- `[CONTROL]` -> prove control-flow hijack: run target under `gdb --args <target> <port>`, send payload, confirm RIP lands on attacker-controlled bytes. Build ROP chain if PIE/ASLR allow. Record the controlled register/return address.
-- `[RCE]` -> actually execute attacker code: place a payload that runs `id`/`whoami` and exfiltrates output back through the service's own send path (or a side channel). The Fact must show command output as proof. Tag `[RCE:unauth]` or `[RCE:auth]`.
-- `[PoC]` -> when RCE is proven impossible (abort-gate, NX+no-ROP, canary-unleakable) but a trigger is confirmed reproducibly: record the trigger payload, crash signal+point, AND a clear argument why RCE is impossible from this sink (what blocks it, why no bypass exists). Tag `[PoC:unauth]` or `[PoC:auth]`. This is a terminal verdict — do not keep retrying RCE on a proven-blocked path.
+- `[TRIGGER]` -> craft a packet, send it via a **standalone Python script** (pure `socket`, treats target as remote device — see PoC archiving convention below), capture the crash signal + gdb backtrace (gdb for evidence only, the deliverable is the `.py` script). This confirms the bug fires but is NOT RCE yet.
+- `[CONTROL]` -> prove control-flow hijack: run target under `gdb --args <target> <port>` (for evidence), send payload via the Python script, confirm RIP lands on attacker-controlled bytes. Build ROP chain if PIE/ASLR allow. Record the controlled register/return address. Archive the working exploit as a `.py` script.
+- `[RCE]` -> actually execute attacker code: place a payload that runs `id`/`whoami` and exfiltrates output back through the service's own send path (or a side channel). The Fact must show command output as proof. Tag `[RCE:unauth]` or `[RCE:auth]`. Archive the RCE exploit as a `.py` script.
+- `[PoC]` -> when RCE is proven impossible (abort-gate, NX+no-ROP, canary-unleakable) but a trigger is confirmed reproducibly: record the trigger payload, crash signal+point, AND a clear argument why RCE is impossible from this sink (what blocks it, why no bypass exists). Tag `[PoC:unauth]` or `[PoC:auth]`. **Must archive a standalone Python PoC script** (see convention below). This is a terminal verdict — do not keep retrying RCE on a proven-blocked path.
 - `[BLOCKED]` -> the sink itself is unreachable or untriggerable (no PoC possible): record why. Terminal.
 - `[CHAIN]` -> summary Fact tying a full chain together (RECON->...->RCE/PoC/BLOCKED), used for the final report.
 
@@ -37,7 +37,15 @@ Heavy artifacts MUST be written to files under the runs directory (see Hints / G
 - RCE proof (cmd output)-> `<runs>/crash/rce-{intent_id}.out`
 - checksec / recon      -> `<runs>/notes/recon-{intent_id}.txt`
 
-`description` format: first line is the conclusion (lens+value tag + the confirmed fact: protection/addr/offset/signal/RIP/RCE-output); following lines are file path references. Anything over ~20 lines or non-text goes to disk. The graph is an index; the disk is the body.
+## PoC archiving convention (MANDATORY for `[TRIGGER]` / `[PoC]` / `[RCE]` / `[CONTROL]`)
+Every confirmed trigger or exploit MUST be archived as a **standalone Python script** that treats the target as a **remote device** (no local gdb/strace/gdb --args, pure network I/O):
+- Path: `<runs>/poc/poc_<sink_name>.py` (e.g. `poc_overflow_sink.py`, `poc_magic_crash.py`)
+- The script must be self-contained: pure Python `socket`, takes `target_ip` and `target_port` as args (default `127.0.0.1 <port>`), sends the payload, checks if target crashed (no response = crash), prints a clear verdict.
+- The script must include: (1) the payload bytes, (2) what crash signal/sink it triggers, (3) why RCE is impossible (if applicable).
+- The `description` Fact MUST reference this script path so the PoC is reproducible without the dispatcher.
+- gdb/strace outputs stay in `crash/` as evidence; the `.py` script is the **deliverable** PoC.
+
+`description` format: first line is the conclusion (lens+value tag + the confirmed fact: protection/addr/offset/signal/RIP/RCE-output); following lines are file path references (including the PoC script path). Anything over ~20 lines or non-text goes to disk. The graph is an index; the disk is the body.
 
 # Output Requirements
 Return only one raw JSON object. Do not output anything else. The JSON must be valid, including proper escaping of quotation marks.
@@ -59,8 +67,8 @@ Normal return example:
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
 - The target binary has symbols. Prefer function names (`parse_request+0xb4`) over raw addresses; uprobe/gdb breakpoint by function name.
 - For `[BLOCKED]`: state the verdict and STOP retrying that path. Do not loop on a canary/abort-blocked sink - record it and let reason pick the next chain.
-- For `[PoC]`: when RCE is proven impossible but the trigger is reproducible, tag the Fact `[PoC:unauth]` or `[PoC:auth]` with the trigger payload + crash evidence + argument why RCE is impossible. This is a terminal verdict — do not keep trying RCE on this sink.
-- For `[RCE]`: the Fact MUST include proof of executed code (e.g. `id` output). A crash at a controlled RIP is `[CONTROL]`, not `[RCE]`.
+- For `[PoC]`: when RCE is proven impossible but the trigger is reproducible, tag the Fact `[PoC:unauth]` or `[PoC:auth]` with the trigger payload + crash evidence + argument why RCE is impossible. **Must write a standalone Python PoC script** to `<runs>/poc/poc_<sink_name>.py` (pure socket, treats target as remote). Reference the script path in `description`. This is a terminal verdict — do not keep trying RCE on this sink.
+- For `[RCE]`: the Fact MUST include proof of executed code (e.g. `id` output). A crash at a controlled RIP is `[CONTROL]`, not `[RCE]`. **Must write a standalone Python exploit script** to `<runs>/poc/poc_<sink_name>.py`.
 
 # Context
 ## Graph

@@ -27,10 +27,10 @@ Each Fact's description begins with a lens tag. The chain progresses:
 - `[REACH]` confirmation that attacker bytes actually arrive at the sink (uprobe/strace arg capture)
 
 **Back (exploit chain - push as far as possible, then close at PoC if RCE impossible):**
-- `[TRIGGER]` a packet that triggers the bug (crash signal + crash point + reproducible payload). Confirms the bug fires.
-- `[CONTROL]` control-flow hijack achieved: RIP falls on an attacker-controlled address, ROP chain built, or shellcode reached. The gate between DoS and RCE.
-- `[RCE]` full remote code execution: attacker-controlled code actually ran (e.g. `whoami`/`id` output exfiltrated back). Terminal. Tag `[RCE:unauth]` or `[RCE:auth]`.
-- `[PoC]` RCE proven impossible but trigger confirmed reproducibly. Must include: (1) the trigger payload + crash evidence, (2) a clear argument why RCE is impossible from this sink (what blocks it and why no bypass exists). Terminal. Tag `[PoC:unauth]` or `[PoC:auth]`.
+- `[TRIGGER]` a packet that triggers the bug (crash signal + crash point + reproducible payload). Confirms the bug fires. **Must be archived as a standalone Python PoC script** (pure socket, treats target as remote device) at `<runs>/poc/poc_<sink_name>.py`.
+- `[CONTROL]` control-flow hijack achieved: RIP falls on an attacker-controlled address, ROP chain built, or shellcode reached. The gate between DoS and RCE. **Must archive the exploit as a Python script.**
+- `[RCE]` full remote code execution: attacker-controlled code actually ran (e.g. `whoami`/`id` output exfiltrated back). Terminal. Tag `[RCE:unauth]` or `[RCE:auth]`. **Must archive the RCE exploit as a Python script.**
+- `[PoC]` RCE proven impossible but trigger confirmed reproducibly. Must include: (1) the trigger payload + crash evidence, (2) a clear argument why RCE is impossible from this sink (what blocks it and why no bypass exists), (3) **a standalone Python PoC script** at `<runs>/poc/poc_<sink_name>.py` (pure socket, treats target as remote). Terminal. Tag `[PoC:unauth]` or `[PoC:auth]`.
 - `[BLOCKED]` the sink itself is unreachable or untriggerable (no PoC possible). Terminal.
 - `[CHAIN]` a summary Fact that ties a full chain together (RECON->...->RCE/PoC/BLOCKED) for the final report.
 
