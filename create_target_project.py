@@ -26,27 +26,34 @@ BINARY = str(Path(__file__).resolve().parent / "targets" / "bpftrace_udp" / "vul
 PORT = 9090
 
 PROJECT = {
-    "title": "UDP靶场-漏洞挖掘与PoC验证",
+    "title": "UDP靶场-渗透测试与RCE攻击链",
     "origin": (
         f"目标：本地 UDP 服务，二进制路径 {BINARY}（ELF，有符号，无源码），"
-        f"监听 127.0.0.1:{PORT}。可用 bpftrace/strace/objdump/radare2。"
-        "已知存在异常数据包处理漏洞，但触发条件未知。"
+        f"监听 127.0.0.1:{PORT}。可用 bpftrace/strace/objdump/radare2/gdb/checksec。"
+        "这是一次渗透测试：枚举所有可达攻击链并尽可能推到 RCE，不要停在第一个 PoC。"
         "靶机可能因 PoC 崩溃，需在发包前确保其运行（见 hints 的运维约定）。"
     ),
     "goal": (
-        "找到一个可被外部 UDP 数据包稳定触发的漏洞，产出可复现的 PoC 数据包，"
-        "并基于动态 trace / 崩溃捕获定位崩溃函数。完成时需同时具备："
-        "可复现 PoC（落盘 .bin）+ 触发到的崩溃信号 + 崩溃点函数定位。"
+        "渗透测试目标：枚举所有可达攻击链，每条尽可能推到 RCE；高价值是无权限 RCE。"
+        "完成判据（三者全需满足）："
+        "(1) 每个已发现的 sink 都有终态结论：[RCE]/[BLOCKED]/[FP]（崩溃型 sink 可记 [BLOCKED:crash-only]）；"
+        "(2) 至少一个 exec 型 sink 被推到 [CONTROL] 或证明 [BLOCKED]；"
+        "(3) 存在一条 [CHAIN] 汇总 Fact，列出所有已闭合的攻击链及其价值定级。"
+        "不要在单个 [TRIGGER] 即停止；[TRIGGER] 只是确认漏洞触发，不等于 [RCE]。"
     ),
     "bootstrap_enabled": True,
     "hints": [
         {
             "content": (
-                "探索分 lens 依序推进，每条 Fact 的 description 首行带 lens 标签："
-                "[SOURCE] 攻击者可控数据入口 -> [CALLCHAIN] 调用链 -> "
-                "[SINK] 对可控数据的无界/危险操作 -> [REACH] 确认字节到达 sink -> "
-                "[POC] 触发崩溃的包 -> [REFINE] 修正未命中预期点的 PoC。"
-                "误报用 [FP] 标注并留理由。"
+                "攻击链 lens 依序推进，每条 Fact description 首行带 lens+价值标签："
+                "[RECON] 防护指纹(checksec: canary/NX/PIE/RELRO) -> [AUTH] 认证边界(无认证可达=高价值) -> "
+                "[SOURCE] 可控数据入口 -> [CALLCHAIN] 调用链 -> "
+                "[SINK:exec|crash] 危险操作(exec 型=RCE相关, crash 型=仅DoS) -> [REACH] 确认字节到达 sink -> "
+                "[TRIGGER] 触发漏洞(信号+崩溃点, 非RCE) -> [CONTROL] 控制流劫持(RIP受控/ROP/shellcode) -> "
+                "[RCE:unauth|auth] 远程代码执行(需有执行证据如id输出) / [BLOCKED] 受阻(记原因+绕过条件)。"
+                "[CHAIN] 汇总攻击链, [REFINE] 修正偏移, [FP] 误报。"
+                "价值排序: [RCE:unauth]>[RCE:auth]>[CONTROL:unauth]>[DoS:unauth]>[BLOCKED]>[FP]。"
+                "不要停在第一个 TRIGGER，每个 sink 都要走到终态。"
             ),
             "creator": "human",
         },
@@ -54,25 +61,26 @@ PROJECT = {
             "content": (
                 "重型产物必须落盘到 " + RUNS_ROOT + "/<project_id>/ 下的子目录"
                 "（trace/asm/poc/crash/notes），文件名带 intent_id 以回溯图节点。"
-                "description 只放结论行（lens 标签 + 地址/偏移/信号/RIP）+ 文件路径引用，"
-                "不内联大段日志/反汇编/PoC 字节。"
+                "description 只放结论行（lens+价值标签 + 地址/偏移/信号/RIP/RCE输出）+ 文件路径引用，"
+                "不内联大段日志/反汇编/payload。RCE 的执行证据也要落盘（crash/rce-<intent>.out）。"
             ),
             "creator": "human",
         },
         {
             "content": (
-                "二进制有符号，uprobe 用函数名挂（不用地址），objdump 按函数名切片。"
-                "bpftrace 需 root；可用 sudo bpftrace。"
-                "内核侧 ingress 跟踪脚本参考 targets/bpftrace_udp/udp_recv_trace.bt。"
+                "二进制有符号，gdb/uprobe 用函数名挂（不用地址），objdump 按函数名切片。"
+                "ptrace_scope=1：strace/gdb 只能跟踪自己起的子进程，不能 attach 已有进程——"
+                "所以用 strace/gdb --args 把靶机作为子进程启动跟踪，不要 -p attach。"
+                "bpftrace 需 root（若需内核侧跟踪用 sudo bpftrace，需配 sudoers）。"
             ),
             "creator": "human",
         },
         {
             "content": (
-                "靶机运维：PoC 会把服务打崩。发包前先确认进程在运行，"
+                "靶机运维：PoC/TRIGGER 会把服务打崩。发包前先确认进程在运行，"
                 f"若不在则重启：{BINARY} {PORT} &。"
-                "崩溃捕获建议在发包进程外用 strace -e signal 跟踪目标 PID，"
-                "或开启 coredump。"
+                "崩溃/控制流捕获建议用 gdb --args 起靶机作为子进程，发包后 gdb 抓 SIGSEGV/SIGABRT + backtrace + RIP。"
+                "CONTROL 验证：gdb 确认 RIP 落在受控地址。"
             ),
             "creator": "human",
         },

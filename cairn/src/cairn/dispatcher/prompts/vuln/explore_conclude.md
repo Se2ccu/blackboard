@@ -21,7 +21,7 @@ Normal return example:
 - Do not run any more commands, make any more tool calls, inspect anything else, wait for any unfinished command, or try to obtain any additional information.
 - Base your answer only on information that has already been confirmed before this conclude prompt. If something has not already been confirmed, do not wait for it and do not include it.
 - This JSON summary is your final output for this phase. After outputting it, stop.
-- `description` must begin with the lens tag ([SOURCE]/[CALLCHAIN]/[SINK]/[REACH]/[POC]/[REFINE]/[FP]) and state an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler.
+- `description` must begin with the lens+value tag ([RECON]/[AUTH]/[SOURCE]/[CALLCHAIN]/[SINK:exec|crash]/[REACH]/[TRIGGER]/[CONTROL]/[RCE:unauth|auth]/[BLOCKED]/[CHAIN]/[FP]) and state an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler.
 - Do not put long data blobs in `description`; long data (bpftrace logs, disassembly, PoC bytes, coredumps) should be placed in a file under the runs directory and referenced from `description` instead.
 - `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
 

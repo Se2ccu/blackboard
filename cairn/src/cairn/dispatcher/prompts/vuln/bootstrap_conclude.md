@@ -22,7 +22,7 @@ Normal return example:
 - Base your answer only on information that has already been confirmed before this conclude prompt. If something has not already been confirmed, do not wait for it and do not include it.
 - This JSON summary is your final output for this phase. After outputting it, stop.
 - Do not output `complete` in this phase. Even if Goal is not achieved or you want to explain status, put that information into `fact.description` only.
-- `fact.description` must begin with the lens tag ([SOURCE]/[CALLCHAIN]/[SINK]/[REACH]/[POC]/[REFINE]/[FP]) and state an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler.
+- `fact.description` must begin with the lens tag ([RECON]/[SOURCE]/[FP]) and state an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler.
 - Do not put long data blobs in `fact.description`; long data (bpftrace logs, disassembly, PoC bytes, coredumps) should be placed in a file under the runs directory and referenced from `description` instead.
 
 # Context
